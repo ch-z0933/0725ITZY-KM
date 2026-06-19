@@ -321,7 +321,6 @@ with status_placeholder.container():
             rank_display = pd.DataFrame({
                 "排名": [f"第 {idx} 名" for idx in final_rank_df.index],
                 "單筆張數": final_rank_df['張數'].values,
-                "來源": final_rank_df['來源'].values
             })
             st.table(rank_display)
         else:
