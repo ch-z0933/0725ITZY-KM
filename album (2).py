@@ -112,7 +112,11 @@ def append_sale_log(now_str, diff, source, total_now):
 # =========================
 # 5. API 抓取
 # =========================
-def get_total_sales(session):
+INTL_API = "https://kmonstar.com/api/v1/event/detail/72fc931d-ebc0-4208-9a7c-e6e8d8b8643e"
+INTL_INITIAL_STOCK = 10000
+
+
+def get_tw_sales(session):
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
@@ -132,16 +136,56 @@ def get_total_sales(session):
 
         for v in data.get("variants", []):
             inventory_qty = v.get("inventory_quantity", 0)
-
-            # Kmonstar 台灣站目前常用負數代表累積銷售
-            sold = abs(int(inventory_qty))
-            total_sold += sold
+            total_sold += abs(int(inventory_qty))
 
         return total_sold
 
     except Exception as e:
-        st.sidebar.error(f"API 抓取失敗: {e}")
+        st.sidebar.error(f"台灣 API 抓取失敗: {e}")
         return 0
+
+
+def get_intl_sales(session):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://kmonstar.com/zh/eventproductdetail/72fc931d-ebc0-4208-9a7c-e6e8d8b8643e",
+        "Origin": "https://kmonstar.com",
+    }
+
+    try:
+        res = session.get(
+            f"{INTL_API}?t={int(time.time())}",
+            headers=headers,
+            timeout=10
+        )
+
+        if res.status_code != 200:
+            return 0
+
+        data = res.json()
+        options = data.get("data", {}).get("optionList", [])
+
+        total_sold = 0
+
+        for o in options:
+            stock_ko = o.get("stockKo", {}).get("quantity")
+
+            if stock_ko is not None:
+                total_sold += INTL_INITIAL_STOCK - int(stock_ko)
+
+        return total_sold
+
+    except Exception as e:
+        st.sidebar.error(f"國際 API 抓取失敗: {e}")
+        return 0
+
+
+def get_total_sales(session):
+    tw = get_tw_sales(session)
+    intl = get_intl_sales(session)
+
+    return tw, intl, tw + intl
 
 # =========================
 # 6. 排行沖銷退單
@@ -195,7 +239,7 @@ st.session_state.log_df = log_df
 tz = pytz.timezone('Asia/Taipei')
 now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
-total_now = get_total_sales(session)
+tw_now, intl_now, total_now = get_total_sales(session)
 
 last_total_in_sheet = 0
 if not log_df.empty and '總銷售量' in log_df.columns:
@@ -241,9 +285,11 @@ with status_placeholder.container():
     st.write("### 📊 ITZY 團體簽售總銷量")
 
     summary_df = pd.DataFrame([{
-        "項目": ITEM_NAME,
-        "目前總銷量": total_now
-    }])
+    "項目": ITEM_NAME,
+    "台灣版": tw_now,
+    "國際版": intl_now,
+    "總計": total_now
+}])
     st.table(summary_df)
 
     st.divider()
