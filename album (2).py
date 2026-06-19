@@ -195,6 +195,7 @@ def build_rank_df(log_df):
         return pd.DataFrame(columns=['張數', '來源'])
 
     rank_df = log_df.copy()
+    rank_df = rank_df[~rank_df['來源'].isin(['INIT', '補歷史'])]
     rank_df['張數'] = pd.to_numeric(rank_df['張數'], errors='coerce').fillna(0).astype(int)
 
     positives = rank_df[rank_df['張數'] > 0].copy().reset_index(drop=True)
