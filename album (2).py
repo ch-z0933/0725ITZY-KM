@@ -103,6 +103,14 @@ def append_sale_log(now_str, diff, source, total_now):
 
     try:
         wks = ensure_worksheet()
+
+        # 防止 Streamlit 重複 session 同時寫入一樣的總銷售量
+        values = wks.get_all_values()
+        if len(values) > 1:
+            latest_total = int(float(values[-1][3]))
+            if latest_total == int(total_now):
+                return False
+
         wks.append_row([now_str, int(diff), source, int(total_now)])
         return True
     except Exception as e:
@@ -132,18 +140,22 @@ def get_tw_sales(session):
         res.raise_for_status()
         data = res.json()
 
-        total_sold = 0
+        variants = data.get("variants", [])
+        if not variants:
+            return None
 
-        for v in data.get("variants", []):
-            inventory_qty = v.get("inventory_quantity", 0)
+        total_sold = 0
+        for v in variants:
+            inventory_qty = v.get("inventory_quantity", None)
+            if inventory_qty is None:
+                continue
             total_sold += abs(int(inventory_qty))
 
         return total_sold
 
     except Exception as e:
         st.sidebar.error(f"台灣 API 抓取失敗: {e}")
-        return 0
-
+        return None
 
 def get_intl_sales(session):
     headers = {
@@ -184,6 +196,9 @@ def get_intl_sales(session):
 def get_total_sales(session):
     tw = get_tw_sales(session)
     intl = get_intl_sales(session)
+
+    if tw is None:
+        return None, intl, intl
 
     return tw, intl, tw + intl
 
@@ -242,6 +257,15 @@ now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
 tw_now, intl_now, total_now = get_total_sales(session)
 
+# 如果台灣 API 抓失敗，不寫入，避免出現 -900 這種假退單
+if tw_now is None:
+    st.sidebar.warning("台灣 API 本輪抓取異常，已跳過寫入。")
+    tw_now = 0
+    total_now = intl_now
+    skip_write = True
+else:
+    skip_write = False
+
 last_total_in_sheet = 0
 if not log_df.empty and '總銷售量' in log_df.columns:
     last_total_in_sheet = int(pd.to_numeric(
@@ -251,15 +275,39 @@ if not log_df.empty and '總銷售量' in log_df.columns:
 
 diff = total_now - last_total_in_sheet
 
+# 防止 API 短暫歸零或大幅錯誤回傳
+MAX_REASONABLE_DROP = 100
+
+if diff < -MAX_REASONABLE_DROP:
+    st.sidebar.warning(
+        f"偵測到異常大幅下降：{diff}，本輪不寫入。"
+    )
+    skip_write = True
+
 # 第一次啟動且 Sheet 是空的，不補舊單
 if not st.session_state.bootstrapped and last_total_in_sheet == 0:
     st.session_state.last_total = total_now
 else:
-    if diff != 0:
-        if diff > 0:
-            source = f"TW+{diff}"
-        else:
-            source = f"TW退{abs(diff)}"
+    if diff != 0 and not skip_write:
+        prev_tw = st.session_state.get("last_tw", tw_now)
+        prev_intl = st.session_state.get("last_intl", intl_now)
+
+        tw_delta = tw_now - prev_tw
+        intl_delta = intl_now - prev_intl
+
+        source_parts = []
+
+        if tw_delta > 0:
+            source_parts.append(f"TW+{tw_delta}")
+        elif tw_delta < 0:
+            source_parts.append(f"TW退{abs(tw_delta)}")
+
+        if intl_delta > 0:
+            source_parts.append(f"INTL+{intl_delta}")
+        elif intl_delta < 0:
+            source_parts.append(f"INTL退{abs(intl_delta)}")
+
+        source = " / ".join(source_parts) if source_parts else ("合計變動" if diff > 0 else "合計退單")
 
         ok = append_sale_log(now, diff, source, total_now)
 
@@ -276,7 +324,11 @@ else:
                 ignore_index=True
             )
 
-st.session_state.last_total = total_now
+if not skip_write:
+    st.session_state.last_total = total_now
+    st.session_state.last_tw = tw_now
+    st.session_state.last_intl = intl_now
+
 st.session_state.bootstrapped = True
 
 # =========================
