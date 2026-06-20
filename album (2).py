@@ -27,24 +27,27 @@ except Exception as e:
     gc = None
 
 # =========================
-# 2. 頁面設定
+# 2. 基本設定
 # =========================
 st.set_page_config(page_title="ITZY MOTTO 簽售監控", layout="wide")
 st.title("💿 ITZY MOTTO 簽名會 in Taipei")
 
 TW_API = "https://www.kmonstar.com.tw/products/%E6%87%89%E5%8B%9F-260725-itzy-motto-%E5%B0%88%E8%BC%AF%E7%99%BC%E8%A1%8C%E7%B4%80%E5%BF%B5%E7%B0%BD%E5%90%8D%E6%9C%83-in-taipei.json"
+INTL_API = "https://kmonstar.com/api/v1/event/detail/72fc931d-ebc0-4208-9a7c-e6e8d8b8643e"
 
 ITEM_NAME = "ITZY 團體簽售"
-LOG_COLUMNS = ['時間', '張數', '來源', '總銷售量']
+INTL_INITIAL_STOCK = 10000
+
+LOG_COLUMNS = ['時間', '張數', '來源', '總銷售量', '台灣版總銷量', '國際版總銷量']
+
+MAX_REASONABLE_DROP = 100
+CHECK_SECONDS = 15
 
 # =========================
-# 3. 初始化 session_state
+# 3. 初始化
 # =========================
 if 'log_df' not in st.session_state:
     st.session_state.log_df = pd.DataFrame(columns=LOG_COLUMNS)
-
-if 'last_total' not in st.session_state:
-    st.session_state.last_total = None
 
 if 'bootstrapped' not in st.session_state:
     st.session_state.bootstrapped = False
@@ -60,10 +63,12 @@ def ensure_worksheet():
         return gc.worksheet(ITEM_NAME)
     except:
         try:
-            wks = gc.add_worksheet(title=ITEM_NAME, rows=2000, cols=10)
+            wks = gc.add_worksheet(title=ITEM_NAME, rows=5000, cols=10)
             wks.append_row(LOG_COLUMNS)
             return wks
         except Exception as e:
+            if "already exists" in str(e):
+                return gc.worksheet(ITEM_NAME)
             st.sidebar.error(f"建立工作表失敗: {e}")
             return None
 
@@ -79,17 +84,31 @@ def sync_from_cloud():
             wks.append_row(LOG_COLUMNS)
             return pd.DataFrame(columns=LOG_COLUMNS)
 
-        if values[0] != LOG_COLUMNS:
-            wks.clear()
-            wks.append_row(LOG_COLUMNS)
+        # 舊版只有 4 欄時，自動補成新版 6 欄，不清空舊資料
+        headers = values[0]
+        if headers[:4] != ['時間', '張數', '來源', '總銷售量']:
+            st.sidebar.error("Google Sheet 第一列欄位錯誤，請確認是：時間、張數、來源、總銷售量")
             return pd.DataFrame(columns=LOG_COLUMNS)
+
+        if headers != LOG_COLUMNS:
+            wks.update('A1:F1', [LOG_COLUMNS])
+            headers = LOG_COLUMNS
 
         if len(values) == 1:
             return pd.DataFrame(columns=LOG_COLUMNS)
 
-        df = pd.DataFrame(values[1:], columns=values[0])
+        rows = values[1:]
+        fixed_rows = []
+        for row in rows:
+            row = row + [""] * (len(LOG_COLUMNS) - len(row))
+            fixed_rows.append(row[:len(LOG_COLUMNS)])
+
+        df = pd.DataFrame(fixed_rows, columns=LOG_COLUMNS)
         df['張數'] = pd.to_numeric(df['張數'], errors='coerce').fillna(0).astype(int)
         df['總銷售量'] = pd.to_numeric(df['總銷售量'], errors='coerce').fillna(0).astype(int)
+        df['台灣版總銷量'] = pd.to_numeric(df['台灣版總銷量'], errors='coerce').fillna(-1).astype(int)
+        df['國際版總銷量'] = pd.to_numeric(df['國際版總銷量'], errors='coerce').fillna(-1).astype(int)
+
         df = df.iloc[::-1].reset_index(drop=True)
         return df
 
@@ -97,22 +116,23 @@ def sync_from_cloud():
         st.sidebar.error(f"同步雲端資料失敗: {e}")
         return pd.DataFrame(columns=LOG_COLUMNS)
 
-def append_sale_log(now_str, diff, source, total_now):
+def append_sale_log(now_str, diff, source, total_now, tw_now, intl_now):
     if not gc:
         return False
 
     try:
         wks = ensure_worksheet()
-
-        # 防止 Streamlit 重複 session 同時寫入一樣的總銷售量
         values = wks.get_all_values()
+
         if len(values) > 1:
-            latest_total = int(float(values[-1][3]))
+            latest = values[-1]
+            latest_total = int(float(latest[3]))
             if latest_total == int(total_now):
                 return False
 
-        wks.append_row([now_str, int(diff), source, int(total_now)])
+        wks.append_row([now_str, int(diff), source, int(total_now), int(tw_now), int(intl_now)])
         return True
+
     except Exception as e:
         st.sidebar.error(f"寫入失敗: {e}")
         return False
@@ -120,38 +140,49 @@ def append_sale_log(now_str, diff, source, total_now):
 # =========================
 # 5. API 抓取
 # =========================
-INTL_API = "https://kmonstar.com/api/v1/event/detail/72fc931d-ebc0-4208-9a7c-e6e8d8b8643e"
-INTL_INITIAL_STOCK = 10000
-
-
-def get_tw_sales(session):
+def get_tw_sales_once(session):
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
         "Referer": "https://www.kmonstar.com.tw/"
     }
 
-    try:
-        res = session.get(
-            f"{TW_API}?t={int(time.time())}",
-            headers=headers,
-            timeout=10
-        )
-        res.raise_for_status()
-        data = res.json()
+    res = session.get(f"{TW_API}?t={int(time.time())}", headers=headers, timeout=10)
+    res.raise_for_status()
+    data = res.json()
 
-        variants = data.get("variants", [])
-        if not variants:
+    variants = data.get("variants", [])
+    if not variants:
+        return None
+
+    total_sold = 0
+    for v in variants:
+        inventory_qty = v.get("inventory_quantity", None)
+        if inventory_qty is None:
+            continue
+        total_sold += abs(int(inventory_qty))
+
+    return total_sold
+
+def get_tw_sales(session):
+    try:
+        first = get_tw_sales_once(session)
+
+        if first is None:
             return None
 
-        total_sold = 0
-        for v in variants:
-            inventory_qty = v.get("inventory_quantity", None)
-            if inventory_qty is None:
-                continue
-            total_sold += abs(int(inventory_qty))
+        # 如果台灣站偶發回傳異常低值，第二次確認
+        time.sleep(1)
+        second = get_tw_sales_once(session)
 
-        return total_sold
+        if second is None:
+            return first
+
+        # 兩次差太多時，取較大的那個，避免短暫掉到 75
+        if abs(second - first) > MAX_REASONABLE_DROP:
+            return max(first, second)
+
+        return second
 
     except Exception as e:
         st.sidebar.error(f"台灣 API 抓取失敗: {e}")
@@ -166,23 +197,18 @@ def get_intl_sales(session):
     }
 
     try:
-        res = session.get(
-            f"{INTL_API}?t={int(time.time())}",
-            headers=headers,
-            timeout=10
-        )
+        res = session.get(f"{INTL_API}?t={int(time.time())}", headers=headers, timeout=10)
 
         if res.status_code != 200:
-            return 0
+            st.sidebar.warning(f"國際 API 狀態碼：{res.status_code}")
+            return None
 
         data = res.json()
         options = data.get("data", {}).get("optionList", [])
 
         total_sold = 0
-
         for o in options:
             stock_ko = o.get("stockKo", {}).get("quantity")
-
             if stock_ko is not None:
                 total_sold += INTL_INITIAL_STOCK - int(stock_ko)
 
@@ -190,15 +216,20 @@ def get_intl_sales(session):
 
     except Exception as e:
         st.sidebar.error(f"國際 API 抓取失敗: {e}")
-        return 0
-
+        return None
 
 def get_total_sales(session):
     tw = get_tw_sales(session)
     intl = get_intl_sales(session)
 
+    if tw is None and intl is None:
+        return None, None, None
+
     if tw is None:
-        return None, intl, intl
+        tw = 0
+
+    if intl is None:
+        intl = 0
 
     return tw, intl, tw + intl
 
@@ -207,7 +238,7 @@ def get_total_sales(session):
 # =========================
 def build_rank_df(log_df):
     if log_df.empty:
-        return pd.DataFrame(columns=['張數', '來源'])
+        return pd.DataFrame(columns=['張數'])
 
     rank_df = log_df.copy()
     rank_df = rank_df[~rank_df['來源'].isin(['INIT', '補歷史'])]
@@ -216,12 +247,8 @@ def build_rank_df(log_df):
     positives = rank_df[rank_df['張數'] > 0].copy().reset_index(drop=True)
     negatives = rank_df[rank_df['張數'] < 0].copy().reset_index(drop=True)
 
-    if positives.empty:
-        return pd.DataFrame(columns=['張數', '來源'])
-
     kept_rows = positives.to_dict('records')
 
-    # 退單：刪掉一筆相同張數的正單
     for _, row in negatives.iterrows():
         cancel_qty = abs(int(row['張數']))
 
@@ -235,7 +262,7 @@ def build_rank_df(log_df):
             kept_rows.pop(match_idx)
 
     if not kept_rows:
-        return pd.DataFrame(columns=['張數', '來源'])
+        return pd.DataFrame(columns=['張數'])
 
     final_rank_df = pd.DataFrame(kept_rows)
     final_rank_df['張數'] = pd.to_numeric(final_rank_df['張數'], errors='coerce').fillna(0).astype(int)
@@ -257,43 +284,50 @@ now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
 tw_now, intl_now, total_now = get_total_sales(session)
 
-# 如果台灣 API 抓失敗，不寫入，避免出現 -900 這種假退單
-if tw_now is None:
-    st.sidebar.warning("台灣 API 本輪抓取異常，已跳過寫入。")
-    tw_now = 0
-    total_now = intl_now
+skip_write = False
+
+if total_now is None:
+    st.sidebar.warning("本輪 API 抓取失敗，已跳過寫入。")
+    tw_now, intl_now, total_now = 0, 0, 0
     skip_write = True
-else:
-    skip_write = False
 
 last_total_in_sheet = 0
-if not log_df.empty and '總銷售量' in log_df.columns:
-    last_total_in_sheet = int(pd.to_numeric(
-        pd.Series([log_df.iloc[0]['總銷售量']]),
-        errors='coerce'
-    ).fillna(0).iloc[0])
+last_tw_in_sheet = None
+last_intl_in_sheet = None
+
+if not log_df.empty:
+    last_total_in_sheet = int(log_df.iloc[0]['總銷售量'])
+
+    if int(log_df.iloc[0]['台灣版總銷量']) >= 0:
+        last_tw_in_sheet = int(log_df.iloc[0]['台灣版總銷量'])
+
+    if int(log_df.iloc[0]['國際版總銷量']) >= 0:
+        last_intl_in_sheet = int(log_df.iloc[0]['國際版總銷量'])
+
+# 舊資料沒有 TW / INTL 分開總量時，用目前 API 作為基準，避免來源亂判斷
+if last_tw_in_sheet is None:
+    last_tw_in_sheet = tw_now
+
+if last_intl_in_sheet is None:
+    last_intl_in_sheet = intl_now
 
 diff = total_now - last_total_in_sheet
 
-# 防止 API 短暫歸零或大幅錯誤回傳
-MAX_REASONABLE_DROP = 100
-
+# 避免台灣 API 短暫掉到 75 造成假退單
 if diff < -MAX_REASONABLE_DROP:
-    st.sidebar.warning(
-        f"偵測到異常大幅下降：{diff}，本輪不寫入。"
-    )
+    st.sidebar.warning(f"偵測到異常大幅下降：{diff}，本輪不寫入。")
+    total_now = last_total_in_sheet
+    tw_now = last_tw_in_sheet
+    intl_now = last_intl_in_sheet
     skip_write = True
 
 # 第一次啟動且 Sheet 是空的，不補舊單
 if not st.session_state.bootstrapped and last_total_in_sheet == 0:
-    st.session_state.last_total = total_now
+    st.session_state.bootstrapped = True
 else:
     if diff != 0 and not skip_write:
-        prev_tw = st.session_state.get("last_tw", tw_now)
-        prev_intl = st.session_state.get("last_intl", intl_now)
-
-        tw_delta = tw_now - prev_tw
-        intl_delta = intl_now - prev_intl
+        tw_delta = tw_now - last_tw_in_sheet
+        intl_delta = intl_now - last_intl_in_sheet
 
         source_parts = []
 
@@ -309,27 +343,19 @@ else:
 
         source = " / ".join(source_parts) if source_parts else ("合計變動" if diff > 0 else "合計退單")
 
-        ok = append_sale_log(now, diff, source, total_now)
+        ok = append_sale_log(now, diff, source, total_now, tw_now, intl_now)
 
         if ok:
             new_entry = pd.DataFrame([{
                 '時間': now,
                 '張數': int(diff),
                 '來源': source,
-                '總銷售量': int(total_now)
+                '總銷售量': int(total_now),
+                '台灣版總銷量': int(tw_now),
+                '國際版總銷量': int(intl_now)
             }])
 
-            st.session_state.log_df = pd.concat(
-                [new_entry, log_df],
-                ignore_index=True
-            )
-
-if not skip_write:
-    st.session_state.last_total = total_now
-    st.session_state.last_tw = tw_now
-    st.session_state.last_intl = intl_now
-
-st.session_state.bootstrapped = True
+            st.session_state.log_df = pd.concat([new_entry, log_df], ignore_index=True)
 
 # =========================
 # 8. 畫面顯示
@@ -338,11 +364,11 @@ with status_placeholder.container():
     st.write("### 📊 ITZY 團體簽售總銷量")
 
     summary_df = pd.DataFrame([{
-    "項目": ITEM_NAME,
-    "台灣版": tw_now,
-    "國際版": intl_now,
-    "總計": total_now
-}])
+        "項目": ITEM_NAME,
+        "台灣版": tw_now,
+        "國際版": intl_now,
+        "總計": total_now
+    }])
     st.table(summary_df)
 
     st.divider()
@@ -379,5 +405,6 @@ with status_placeholder.container():
             st.info("目前沒有有效排行資料")
 
 st.caption(f"最後更新時間：{now}")
-time.sleep(15)
+
+time.sleep(CHECK_SECONDS)
 st.rerun()
