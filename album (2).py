@@ -29,7 +29,49 @@ except Exception as e:
 # =========================
 # 2. 基本設定
 # =========================
-st.set_page_config(page_title="ITZY MOTTO 簽售監控", layout="wide")
+st.set_page_config(
+    page_title="ITZY MOTTO 簽售監控",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+# 隱藏工具列、右上角⋮、左上角 Streamlit、側邊欄、頁首頁尾
+st.markdown("""
+<style>
+
+/* 右上角⋮工具列 */
+[data-testid="stToolbar"] {
+    display: none;
+}
+
+/* 左上角 Streamlit icon */
+[data-testid="stDecoration"] {
+    display: none;
+}
+
+/* 左側 Sidebar */
+[data-testid="stSidebar"] {
+    display: none;
+}
+
+/* Header */
+header {
+    visibility: hidden;
+}
+
+/* Footer */
+footer {
+    visibility: hidden;
+}
+
+/* Main Menu */
+#MainMenu {
+    visibility: hidden;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
 st.title("💿 ITZY MOTTO 簽名會 in Taipei")
 
 TW_API = "https://www.kmonstar.com.tw/products/%E6%87%89%E5%8B%9F-260725-itzy-motto-%E5%B0%88%E8%BC%AF%E7%99%BC%E8%A1%8C%E7%B4%80%E5%BF%B5%E7%B0%BD%E5%90%8D%E6%9C%83-in-taipei.json"
