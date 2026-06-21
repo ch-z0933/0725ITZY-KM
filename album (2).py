@@ -407,7 +407,7 @@ with status_placeholder.container():
         st.write("🕒 **銷售時間紀錄**")
         if not log_df.empty:
             st.dataframe(
-                log_df[['時間', '張數', '來源']],
+                log_df[['時間', '張數', '來源']].head(100),
                 width='stretch',
                 hide_index=True
             )
