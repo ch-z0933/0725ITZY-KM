@@ -304,7 +304,6 @@ if not log_df.empty:
     if int(log_df.iloc[0]['國際版總銷量']) >= 0:
         last_intl_in_sheet = int(log_df.iloc[0]['國際版總銷量'])
 
-# 舊資料沒有 TW / INTL 分開總量時，用目前 API 作為基準，避免來源亂判斷
 if last_tw_in_sheet is None:
     last_tw_in_sheet = tw_now
 
@@ -324,67 +323,66 @@ if diff < -MAX_REASONABLE_DROP:
 # 第一次啟動且 Sheet 是空的，不補舊單
 if not st.session_state.bootstrapped and last_total_in_sheet == 0:
     st.session_state.bootstrapped = True
+
 else:
     if diff != 0 and not skip_write:
         tw_delta = tw_now - last_tw_in_sheet
         intl_delta = intl_now - last_intl_in_sheet
 
-# 台灣版
-if tw_delta != 0:
-    source = f"TW+{tw_delta}" if tw_delta > 0 else f"TW退{abs(tw_delta)}"
+        new_entries = []
 
-    append_sale_log(
-        now,
-        tw_delta,
-        source,
-        total_now,
-        tw_now,
-        intl_now
-    )
+        # 台灣版變動，獨立寫一列
+        if tw_delta != 0:
+            tw_source = f"TW+{tw_delta}" if tw_delta > 0 else f"TW退{abs(tw_delta)}"
 
-# 國際版
-if intl_delta != 0:
-    source = f"INTL+{intl_delta}" if intl_delta > 0 else f"INTL退{abs(intl_delta)}"
+            ok = append_sale_log(
+                now,
+                tw_delta,
+                tw_source,
+                total_now,
+                tw_now,
+                intl_now
+            )
 
-    append_sale_log(
-        now,
-        intl_delta,
-        source,
-        total_now,
-        tw_now,
-        intl_now
-    )
+            if ok:
+                new_entries.append({
+                    '時間': now,
+                    '張數': int(tw_delta),
+                    '來源': tw_source,
+                    '總銷售量': int(total_now),
+                    '台灣版總銷量': int(tw_now),
+                    '國際版總銷量': int(intl_now)
+                })
 
-        if ok:
-            new_entries = []
+        # 國際版變動，獨立寫一列
+        if intl_delta != 0:
+            intl_source = f"INTL+{intl_delta}" if intl_delta > 0 else f"INTL退{abs(intl_delta)}"
 
-if tw_delta != 0:
-    new_entries.append({
-        '時間': now,
-        '張數': tw_delta,
-        '來源': f"TW+{tw_delta}" if tw_delta > 0 else f"TW退{abs(tw_delta)}",
-        '總銷售量': total_now,
-        '台灣版總銷量': tw_now,
-        '國際版總銷量': intl_now
-    })
+            ok = append_sale_log(
+                now,
+                intl_delta,
+                intl_source,
+                total_now,
+                tw_now,
+                intl_now
+            )
 
-if intl_delta != 0:
-    new_entries.append({
-        '時間': now,
-        '張數': intl_delta,
-        '來源': f"INTL+{intl_delta}" if intl_delta > 0 else f"INTL退{abs(intl_delta)}",
-        '總銷售量': total_now,
-        '台灣版總銷量': tw_now,
-        '國際版總銷量': intl_now
-    })
+            if ok:
+                new_entries.append({
+                    '時間': now,
+                    '張數': int(intl_delta),
+                    '來源': intl_source,
+                    '總銷售量': int(total_now),
+                    '台灣版總銷量': int(tw_now),
+                    '國際版總銷量': int(intl_now)
+                })
 
-if new_entries:
-    new_entry_df = pd.DataFrame(new_entries)
-    st.session_state.log_df = pd.concat(
-        [new_entry_df, log_df],
-        ignore_index=True
-    )
-
+        if new_entries:
+            new_entry_df = pd.DataFrame(new_entries)
+            st.session_state.log_df = pd.concat(
+                [new_entry_df, log_df],
+                ignore_index=True
+            )
 # =========================
 # 8. 畫面顯示
 # =========================
